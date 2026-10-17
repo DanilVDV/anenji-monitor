@@ -1,8 +1,22 @@
 # Anenji Monitor
 
-Single-file Python 3 web monitor/control service for an Anenji solar inverter on OpenWrt with four Saihang BLE BMS battery packs.
+Single-file Python 3 web monitor/control service for an Anenji solar inverter on OpenWrt with Saihang BLE BMS battery telemetry.
 
-Current version: **v2.11.26**.
+Current stable version in this repository: **v2.11.26**.
+
+## Verified development hardware
+
+This project is **running, tested and actively debugged on the following real installation**:
+
+- **Inverter:** ANENJI **ANJ-6200-48V-48PL-WIFI**, 48 V battery system, 6.2 kW class.
+- **Batteries:** ANENJI **ANJ-24V100AH** LiFePO4 battery modules.
+- **Battery arrangement used by the project:** four 24 V / 100 Ah modules forming the approximately 48/52 V inverter battery bank; BMS units are monitored individually.
+- **BMS telemetry:** Saihang SH-series BMS, polled over **Bluetooth Low Energy** from OpenWrt.
+- **OpenWrt hardware:** **RMS7688A** development/router board used as the local controller for the inverter monitor, BLE polling and HTTP API.
+- **Inverter link:** RS485 / Modbus RTU, typically `/dev/ttyS2`, 9600 baud, slave 1 on the tested installation.
+- **Web/API service:** Python 3 service on OpenWrt, default HTTP port `8088`.
+
+The companion BMS project documents the low-level BLE reader as tested on the **MT7688AN/OpenWrt** platform. Hardware revisions, UART numbering, Bluetooth adapters and inverter firmware may differ, so register mappings and device paths should be verified before enabling writes.
 
 ## What it does
 
@@ -17,10 +31,40 @@ Current version: **v2.11.26**.
 
 ## Hardware / topology used during development
 
-- Anenji inverter connected through RS485/Modbus.
-- Four Saihang 8-cell / 24 V battery modules arranged for an approximately 52 V inverter battery system.
-- BMS topology: `individual`.
-- Expected BMS pack count: 4.
+```text
+ANJ-6200-48V-48PL-WIFI inverter
+          |
+          | RS485 / Modbus RTU
+          v
+RMS7688A + OpenWrt
+   |              |
+   | BLE          | HTTP / LAN / Wi-Fi
+   v              v
+Saihang BMS     Web UI / external clients
+(ANJ-24V100AH)
+```
+
+The tested battery installation uses four Saihang-equipped 8-cell / 24 V modules. The monitor uses `ANENJI_BMS_TOPOLOGY=individual` and treats every BMS as a separate pack for health/participation analysis while inverter-side voltage/current represents the whole 48 V battery bus.
+
+## Related projects
+
+This repository is the central inverter monitor/API component of a small group of related projects:
+
+### [`DanilVDV/openwrt-saihang-bms`](https://github.com/DanilVDV/openwrt-saihang-bms)
+
+Standalone C CLI and OpenWrt package for Saihang SH-series BLE BMS. It talks directly to Linux Bluetooth MGMT/raw ATT and outputs JSON. `anenji-monitor` uses this tool through `ANENJI_BMS_CMD=saihang-bms` and polls configured BMS MAC addresses with the CLI `read` command.
+
+**Compatibility check:** the current BMS CLI supports JSON output, the `read <MAC>` command and the global `-T/--io-timeout` option used by this monitor. The two projects are aligned for the current BMS polling path.
+
+### [`DanilVDV/anenji-rgb-display`](https://github.com/DanilVDV/anenji-rgb-display)
+
+External 64×32 HUB75 RGB information display built around Arduino Mega 2560 + ESP8266. It displays solar production, grid/load power, battery charge/discharge, SOC, clock and estimated autonomy.
+
+The ESP8266 bridge polls an RMS/OpenWrt HTTP endpoint and forwards a compact UART packet to the Mega.
+
+**Compatibility status:** the RGB-display firmware currently expects a compact `/api/rgb` endpoint. The stable `anenji-monitor` `main` file in this repository is still **v2.11.26** and exposes `/api/summary`, but not `/api/rgb`. The RGB-display repository contains later experimental server snapshots (`v2.11.27` through `v2.11.32`) that add and refine `/api/rgb`, including SOC/time/grid-present handling. Those server-side changes should be reviewed and promoted into this repository before the RGB display is considered fully synchronized with `main`.
+
+In other words: **Saihang BMS integration matches the current monitor; RGB display integration is one server-version step ahead of this repository and still needs to be merged back here.**
 
 ## Run
 
@@ -171,13 +215,15 @@ attention_require_grid_absent
 
 ## External display / dashboard
 
-For an external display, use one request and avoid duplicating battery logic in the display client:
+For a generic external dashboard connected to the current stable `main`, use:
 
 ```sh
 curl -s http://127.0.0.1:8088/api/summary
 ```
 
 A display can refresh this endpoint every few seconds and render only the fields it needs.
+
+The dedicated `anenji-rgb-display` project currently targets `/api/rgb`; see the compatibility note in **Related projects** above.
 
 ## BMS behavior
 
@@ -221,5 +267,6 @@ ANENJI_BMS_POST_RECOVERY_POLL_SEC=20
 anenji_web.py                 Current stable application
 archive/                      Versioned snapshots
 README.md                     Project notes and installation/behavior description
+CHANGELOG.md                  Version history
 .gitignore                    Local/runtime files not committed
 ```
