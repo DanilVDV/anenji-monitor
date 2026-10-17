@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <rect width="1200" height="760" fill="#f4f4f4"/>
+  <rect x="0" y="0" width="1200" height="54" fill="#171a1f"/>
+  <text x="24" y="34" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#ffffff">ANENJI RS485 — v2.11.26</text>
+  <circle cx="1110" cy="27" r="5" fill="#28c76f"/>
+  <text x="1122" y="33" font-family="Arial,sans-serif" font-size="17" fill="#46d980">RS485 online</text>
+
+  <rect x="20" y="76" width="1160" height="420" rx="18" fill="#ffffff" stroke="#dedede"/>
+  <text x="42" y="118" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="#111111">Энергопотоки</text>
+
+  <rect x="462" y="142" width="276" height="110" rx="18" fill="#fff" stroke="#cdd7e1"/>
+  <text x="600" y="175" text-anchor="middle" font-family="Arial,sans-serif" font-size="26">☀️</text>
+  <text x="600" y="198" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#666">PV</text>
+  <text x="600" y="225" text-anchor="middle" font-family="Arial,sans-serif" font-size="29" font-weight="700">465 W</text>
+  <text x="600" y="245" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#777">175.9 V · 2.6 A</text>
+
+  <rect x="42" y="300" width="310" height="122" rx="18" fill="#fff" stroke="#cdd7e1"/>
+  <text x="197" y="335" text-anchor="middle" font-family="Arial,sans-serif" font-size="26">⚡</text>
+  <text x="197" y="358" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#666">Сеть</text>
+  <text x="197" y="390" text-anchor="middle" font-family="Arial,sans-serif" font-size="30" font-weight="700">2465 W</text>
+  <text x="197" y="412" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#777">204.7 V · ~12.0 A · 50.01 Hz</text>
+
+  <rect x="445" y="300" width="310" height="122" rx="18" fill="#fff" stroke="#cdd7e1"/>
+  <text x="600" y="335" text-anchor="middle" font-family="Arial,sans-serif" font-size="26">▣</text>
+  <text x="600" y="358" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#666">Инвертор</text>
+  <text x="600" y="390" text-anchor="middle" font-family="Arial,sans-serif" font-size="30" font-weight="700">-1679 W</text>
+  <text x="600" y="412" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#777">205.0 V · 8.2 A · 49.97 Hz</text>
+
+  <rect x="848" y="300" width="310" height="122" rx="18" fill="#fff" stroke="#cdd7e1"/>
+  <text x="1003" y="335" text-anchor="middle" font-family="Arial,sans-serif" font-size="26">🏠</text>
+  <text x="1003" y="358" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#666">Нагрузка</text>
+  <text x="1003" y="390" text-anchor="middle" font-family="Arial,sans-serif" font-size="30" font-weight="700">834 W</text>
+  <text x="1003" y="412" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#777">16 % · 4.7 A · 962 VA</text>
+
+  <rect x="462" y="448" width="276" height="108" rx="18" fill="#fff" stroke="#52c778" stroke-width="2"/>
+  <text x="600" y="480" text-anchor="middle" font-family="Arial,sans-serif" font-size="26">🔋</text>
+  <text x="600" y="503" text-anchor="middle" font-family="Arial,sans-serif" font-size="17" fill="#666">Батарея</text>
+  <text x="600" y="531" text-anchor="middle" font-family="Arial,sans-serif" font-size="30" font-weight="700">54.1 V</text>
+  <text x="600" y="551" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#777">90 % · 38.5 A · active 0/4</text>
+
+  <path d="M600 252 L600 292" stroke="#20b866" stroke-width="10" stroke-linecap="round"/>
+  <polygon points="600,298 586,278 614,278" fill="#20b866"/>
+  <path d="M352 361 L435 361" stroke="#20b866" stroke-width="10" stroke-linecap="round"/>
+  <polygon points="442,361 420,347 420,375" fill="#20b866"/>
+  <path d="M755 361 L838 361" stroke="#20b866" stroke-width="10" stroke-linecap="round"/>
+  <polygon points="845,361 823,347 823,375" fill="#20b866"/>
+  <path d="M600 422 L600 440" stroke="#20b866" stroke-width="10" stroke-linecap="round"/>
+  <polygon points="600,447 586,427 614,427" fill="#20b866"/>
+
+  <rect x="20" y="518" width="1160" height="220" rx="18" fill="#ffffff" stroke="#dedede"/>
+  <text x="42" y="560" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="#111">BMS батарей</text>
+  <circle cx="208" cy="553" r="6" fill="#41d86e"/>
+  <text x="222" y="560" font-family="Arial,sans-serif" font-size="22" font-weight="700" fill="#41d86e">4/4 online</text>
+
+  <g font-family="Arial,sans-serif">
+    <rect x="42" y="590" width="255" height="122" rx="14" fill="#fbfbfb" stroke="#d7dfe7"/>
+    <text x="60" y="620" font-size="18" font-weight="700">Pack 1 · SH24100-H-1</text>
+    <text x="60" y="649" font-size="16" fill="#2baf59">заряд</text>
+    <text x="60" y="676" font-size="18">26.910 V · 17.42 A</text>
+    <text x="60" y="701" font-size="18">SOC 96 % · 25.2 °C</text>
+
+    <rect x="319" y="590" width="255" height="122" rx="14" fill="#fbfbfb" stroke="#d7dfe7"/>
+    <text x="337" y="620" font-size="18" font-weight="700">Pack 2 · SH24100-H-2</text>
+    <text x="337" y="649" font-size="16" fill="#2baf59">заряд</text>
+    <text x="337" y="676" font-size="18">26.920 V · 17.46 A</text>
+    <text x="337" y="701" font-size="18">SOC 96 % · 25.0 °C</text>
+
+    <rect x="596" y="590" width="255" height="122" rx="14" fill="#fbfbfb" stroke="#d7dfe7"/>
+    <text x="614" y="620" font-size="18" font-weight="700">Pack 3 · SH24100-H-3</text>
+    <text x="614" y="649" font-size="16" fill="#2baf59">заряд</text>
+    <text x="614" y="676" font-size="18">26.930 V · 18.32 A</text>
+    <text x="614" y="701" font-size="18">SOC 96 % · 25.0 °C</text>
+
+    <rect x="873" y="590" width="255" height="122" rx="14" fill="#fbfbfb" stroke="#d7dfe7"/>
+    <text x="891" y="620" font-size="18" font-weight="700">Pack 4 · SH24100-H-4</text>
+    <text x="891" y="649" font-size="16" fill="#2baf59">заряд</text>
+    <text x="891" y="676" font-size="18">26.940 V · 18.34 A</text>
+    <text x="891" y="701" font-size="18">SOC 96 % · 25.0 °C</text>
+  </g>
+</svg>
