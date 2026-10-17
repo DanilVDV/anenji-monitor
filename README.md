@@ -6,9 +6,9 @@ Current stable version in this repository: **v2.11.26**.
 
 ## Interface preview
 
-[![ANENJI Monitor web interface](docs/media/anenji-monitor-ui.jpg)](docs/media/anenji-monitor-demo.mp4)
+[![ANENJI Monitor web interface](docs/media/anenji-monitor-preview.svg)](docs/media/anenji-monitor-demo.mp4)
 
-Real web interface from the running ANJ-6200-48V-48PL-WIFI / RMS7688A installation. Click the screenshot to open the demo video.
+Real web interface preview from the running ANJ-6200-48V-48PL-WIFI / RMS7688A installation. Click the preview to open the demo video.
 
 **Demo video:** [docs/media/anenji-monitor-demo.mp4](docs/media/anenji-monitor-demo.mp4)
 
@@ -274,7 +274,7 @@ ANENJI_BMS_POST_RECOVERY_POLL_SEC=20
 ```text
 anenji_web.py                 Current stable application
 archive/                      Versioned snapshots
-docs/media/                   UI screenshot and demo video
+docs/media/                   UI preview and demo video
 README.md                     Project notes and installation/behavior description
 CHANGELOG.md                  Version history
 .gitignore                    Local/runtime files not committed
