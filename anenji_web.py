@@ -53,6 +53,7 @@ DISCHARGE_POWER_OFF_W=float(os.getenv("ANENJI_DISCHARGE_POWER_OFF_W","50"))
 DISCHARGE_ON_DELAY_SEC=float(os.getenv("ANENJI_DISCHARGE_ON_DELAY_SEC","10"))
 DISCHARGE_OFF_DELAY_SEC=float(os.getenv("ANENJI_DISCHARGE_OFF_DELAY_SEC","20"))
 DISCHARGE_REQUIRE_GRID_ABSENT=os.getenv("ANENJI_DISCHARGE_REQUIRE_GRID_ABSENT","0")=="1"
+RGB_CHARGE_DETECT_W=float(os.getenv("ANENJI_RGB_CHARGE_DETECT_W","20"))
 ANJ_BMS={
  "module_full_charge_v":28.0,"module_ov_alarm_v":28.0,"module_ov_protection_v":29.2,
  "module_uv_alarm_v":23.2,"module_uv_protection_v":20.0,
@@ -1958,6 +1959,18 @@ class H(BaseHTTPRequestHandler):
         d=json.dumps(o,ensure_ascii=False).encode()
         try:self.send_response(code);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(d)));self.end_headers();self.wfile.write(d)
         except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):pass
+    def RGB(self,o,code=200):
+        # Legacy compact protocol used by anenji-rgb-display ESP8266.
+        # Preserve short keys, content type, no-store and ASCII output.
+        d=json.dumps(o,ensure_ascii=True,separators=(",",":")).encode("ascii")
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Cache-Control","no-store")
+            self.send_header("Content-Length",str(len(d)))
+            self.end_headers()
+            self.wfile.write(d)
+        except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):pass
     def do_GET(self):
         p=urlparse(self.path)
         if p.path=="/":
@@ -1995,6 +2008,34 @@ class H(BaseHTTPRequestHandler):
             if p.path=="/api/diagnostics":
                 with CACHE_LOCK:
                     return self.J(dict(CACHE["diagnostics"]))
+            if p.path=="/api/rgb":
+                # Contract comes from anenji-rgb-display/server/history/
+                # anenji_web_v2.11.32_rgb_grid_present.py.
+                es=energy_summary()
+                batt_w=float(es.get("battery_power_w") or 0.0)
+                dis=bool(es.get("battery_discharging"))
+                bat_state=1 if dis else (-1 if batt_w<=-RGB_CHARGE_DETECT_W else 0)
+                eta=es.get("eta_to_reserve_sec")
+                _soc=es.get("battery_soc_pct")
+                try:
+                    _soc=float(_soc)
+                    soc=int(round(_soc)) if 0.0 <= _soc <= 100.0 else -1
+                except Exception:
+                    soc=-1
+                return self.RGB({
+                    "p":int(round(float(es.get("pv_w") or 0.0))),
+                    "l":int(round(float(es.get("load_w") or 0.0))),
+                    "g":int(round(float(es.get("grid_w") or 0.0))),
+                    "r":1 if bool(es.get("grid_present")) else 0,
+                    "b":int(round(batt_w)),
+                    "v":round(float(es.get("battery_voltage_v") or 0.0),1),
+                    "c":soc,
+                    "d":1 if dis else 0,
+                    "a":1 if bool(es.get("attention_required")) else 0,
+                    "e":int(round(float(eta))) if eta is not None else -1,
+                    "t":time.strftime("%H:%M"),
+                    "s":bat_state
+                })
             if p.path=="/api/summary":
                 return self.J({"ok":True,**energy_summary()})
             if p.path=="/api/status":
