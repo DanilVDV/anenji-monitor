@@ -10,6 +10,7 @@ BAUD=int(os.getenv("ANENJI_BAUD","9600"))
 SLAVE=int(os.getenv("ANENJI_SLAVE","1"))
 HTTP_PORT=int(os.getenv("ANENJI_HTTP_PORT","8088"))
 POLL_SEC=float(os.getenv("ANENJI_POLL_SEC","2.0"))
+DIAG_POLL_SEC=max(10.0,float(os.getenv("ANENJI_DIAG_POLL_SEC","15.0")))
 ALLOW_WRITE=os.getenv("ANENJI_ALLOW_WRITE","0")=="1"
 LOG_FILE=os.getenv("ANENJI_LOG","/root/anenji/changes.log")
 HISTORY_LEN=int(os.getenv("ANENJI_HISTORY","900"))
@@ -351,8 +352,8 @@ class Bus:
                     time.sleep(.12*(attempt+1))
         raise last
 
-    def read(self,a,n=1):
-        r=self.exchange(bytes([3,a>>8,a&255,n>>8,n&255]))
+    def read(self,a,n=1,retries=3):
+        r=self.exchange(bytes([3,a>>8,a&255,n>>8,n&255]),retries=retries)
         d=r[3:3+r[2]]
         if len(d)!=n*2:raise RuntimeError("Unexpected byte count")
         return [(d[i]<<8)|d[i+1] for i in range(0,len(d),2)]
@@ -394,6 +395,7 @@ class Bus:
 BUS=None;CACHE_LOCK=threading.RLock()
 CACHE={"online":False,"updated":0,"status":[],"settings":[],"rtc":None,"error":"","settings_error":"","rtc_error":"","diagnostics":{"available":False,"updated":0,"faults":[],"warnings":[],"warnings_unmasked":[],"error":""}}
 HISTORY=deque(maxlen=HISTORY_LEN)
+DIAG_LAST_ATTEMPT=0.0
 
 BMS_LOCK=threading.RLock()
 BMS_PARTICIPATION={}
@@ -1048,21 +1050,22 @@ def poll_once():
         update_inverter_mode(vals200[1],now)
     maybe_trigger_bms_on_discharge(bykey)
 
-    # Independent, read-only diagnostic block. Missing/unsupported diagnostics
-    # must not make successfully polled telemetry appear offline.
-    try:
-        diag=decode_inverter_diagnostics(BUS.read_chunked(100,10,10))
-        with CACHE_LOCK:
-            CACHE["diagnostics"]=update_inverter_diagnostics(diag,time.time())
-    except Exception as e:
-        with CACHE_LOCK:
-            # Do not label cached fault bits as current after a failed read.
-            # A subsequent recovery establishes a new observation baseline.
-            INVERTER_EVENT_STATE["masks"]=None
-            INVERTER_EVENT_STATE["since"].clear()
-            CACHE["diagnostics"]={"available":False,"updated":0,"faults":[],
-                                  "warnings":[],"warnings_unmasked":[],
-                                  "events":list(INVERTER_EVENTS),"error":str(e)}
+    # Diagnostics are optional and deliberately rate-limited. One attempt only:
+    # failed diagnostic registers must not delay core telemetry / LED API.
+    global DIAG_LAST_ATTEMPT
+    if now-DIAG_LAST_ATTEMPT >= DIAG_POLL_SEC:
+        DIAG_LAST_ATTEMPT=now
+        try:
+            diag=decode_inverter_diagnostics(BUS.read(100,10,retries=1))
+            with CACHE_LOCK:
+                CACHE["diagnostics"]=update_inverter_diagnostics(diag,time.time())
+        except Exception as e:
+            with CACHE_LOCK:
+                INVERTER_EVENT_STATE["masks"]=None
+                INVERTER_EVENT_STATE["since"].clear()
+                CACHE["diagnostics"]={"available":False,"updated":0,"faults":[],
+                                      "warnings":[],"warnings_unmasked":[],
+                                      "events":list(INVERTER_EVENTS),"error":str(e)}
 
     # Settings/RTC are optional. A temporary failure must not make status offline.
     try:
@@ -1603,22 +1606,9 @@ async function bmsRefresh(){
   }
 }
 
-async function refresh(){
+async function refreshDiagnostics(){
   try{
-    const j=await G('/api/cache');
-    const ageN=j.updated ? ((Date.now()/1000)-j.updated) : 1e9;
-    const age=j.updated ? ageN.toFixed(1) : 'never';
-    const fresh=ageN <= +(j.fresh_sec||Math.max(15,(j.poll_sec||5)*3));
-    $('conn').innerHTML=fresh
-      ? '<span class="ok">● RS485 online</span>'
-      : '<span class="err">● RS485 offline</span>';
-    $('health').innerHTML=
-      `<b>${E(j.port)}</b> · ${j.baud} 8N1 · slave ${j.slave} · cache ${age}s · `+
-      `TX ${j.bus.tx} · RX ${j.bus.rx} · errors ${j.bus.errors} · timeouts ${j.bus.timeouts}`+
-      `<br><b>RTC:</b> ${E(j.rtc||'unknown')}`+
-      `<br><small>${j.error?('last poll: '+E(j.error)):''} ${j.settings_error?' · settings: '+E(j.settings_error):''} ${j.rtc_error?' · rtc: '+E(j.rtc_error):''}</small>`;
-
-    const diag=j.diagnostics||{};
+    const diag=await G('/api/diagnostics');
     const diagEl=$('inverterDiagnostics');
     const stamp=ts=>ts?new Date(ts*1000).toLocaleString('ru-RU'):'—';
     const entries=(arr,cls)=>arr.length
@@ -1648,6 +1638,26 @@ async function refresh(){
          E((x.active?'● ':'○ ')+x.message)+(x.observed?' <small>(при первом чтении)</small>':'')+
          '</span><small>'+E(stamp(x.timestamp))+'</small></div>').join('')+'</div>'
       : '<small>Пока нет событий. Переходы режимов регистрируются после первого успешного опроса.</small>';
+
+  }catch(e){
+    $('inverterDiagnostics').textContent='Диагностика недоступна: '+e.message;
+  }
+}
+
+async function refresh(){
+  try{
+    const j=await G('/api/cache');
+    const ageN=j.updated ? ((Date.now()/1000)-j.updated) : 1e9;
+    const age=j.updated ? ageN.toFixed(1) : 'never';
+    const fresh=ageN <= +(j.fresh_sec||Math.max(15,(j.poll_sec||5)*3));
+    $('conn').innerHTML=fresh
+      ? '<span class="ok">● RS485 online</span>'
+      : '<span class="err">● RS485 offline</span>';
+    $('health').innerHTML=
+      `<b>${E(j.port)}</b> · ${j.baud} 8N1 · slave ${j.slave} · cache ${age}s · `+
+      `TX ${j.bus.tx} · RX ${j.bus.rx} · errors ${j.bus.errors} · timeouts ${j.bus.timeouts}`+
+      `<br><b>RTC:</b> ${E(j.rtc||'unknown')}`+
+      `<br><small>${j.error?('last poll: '+E(j.error)):''} ${j.settings_error?' · settings: '+E(j.settings_error):''} ${j.rtc_error?' · rtc: '+E(j.rtc_error):''}</small>`;
 
     const status=Array.isArray(j.status)?j.status:[];
     $('tele').innerHTML=status.map(x=>
@@ -1929,11 +1939,13 @@ window.openBmsModal=openBmsModal;
 window.closeBmsModal=closeBmsModal;
 rtcNow();
 refresh();
+refreshDiagnostics();
 bmsRefresh();
 profilesLoad();
 settingsLoad();
 rawLoad();
 setInterval(refresh,2000);
+setInterval(refreshDiagnostics,5000);
 setInterval(bmsRefresh,5000);
 setInterval(settingsLoad,30000);
 
@@ -1978,8 +1990,11 @@ class H(BaseHTTPRequestHandler):
                     "bms_active":es.get("bms_active",0),
                     "bms_expected":es.get("bms_expected",len(BMS_MACS))})
             if p.path=="/api/cache":
-                with CACHE_LOCK:c=dict(CACHE)
+                with CACHE_LOCK:c={k:v for k,v in CACHE.items() if k!="diagnostics"}
                 c.update(port=PORT,baud=BAUD,slave=SLAVE,poll_sec=POLL_SEC,fresh_sec=max(15.0,POLL_SEC*3.0),write_enabled=ALLOW_WRITE,bus=dict(tx=BUS.tx,rx=BUS.rx,errors=BUS.errors,timeouts=BUS.timeouts,last_error=BUS.last_error,last_ok=BUS.last_ok),energy=energy_summary());return self.J(c)
+            if p.path=="/api/diagnostics":
+                with CACHE_LOCK:
+                    return self.J(dict(CACHE["diagnostics"]))
             if p.path=="/api/summary":
                 return self.J({"ok":True,**energy_summary()})
             if p.path=="/api/status":
