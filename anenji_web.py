@@ -243,8 +243,10 @@ def update_inverter_mode(raw_mode, ts):
 
 def update_inverter_diagnostics(diag, ts):
     previous=INVERTER_EVENT_STATE["masks"]
-    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"]}
-    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS}
+    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"],
+           "warning_unmasked":diag["warning_unmasked_raw"]}
+    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS,
+           "warning_unmasked":INVERTER_WARNINGS}
     since=INVERTER_EVENT_STATE["since"]
     for kind, mask in masks.items():
         old=previous[kind] if previous is not None else 0
@@ -258,7 +260,7 @@ def update_inverter_diagnostics(diag, ts):
                 if enabled: since[key]={"timestamp":ts,"observed":previous is None}
                 else: since.pop(key,None)
                 _inverter_event(kind,enabled,label,ts,bit,observed=previous is None)
-        field="faults" if kind=="fault" else "warnings"
+        field={"fault":"faults","warning":"warnings","warning_unmasked":"warnings_unmasked"}[kind]
         for item in diag[field]:
             stamp=since.get((kind,item["bit"]))
             if stamp:
@@ -1642,7 +1644,7 @@ async function refresh(){
     const events=Array.isArray(diag.events)?diag.events:[];
     $('inverterEventLog').innerHTML=events.length
       ? '<div style="max-height:360px;overflow:auto">'+events.map(x=>
-         '<div class="kv"><span class="'+(x.type==='fault'?'err':x.type==='warning'?'warn':'')+'">'+
+         '<div class="kv"><span class="'+(x.type==='fault'?'err':x.type.startsWith('warning')?'warn':'')+'">'+
          E((x.active?'● ':'○ ')+x.message)+(x.observed?' <small>(при первом чтении)</small>':'')+
          '</span><small>'+E(stamp(x.timestamp))+'</small></div>').join('')+'</div>'
       : '<small>Пока нет событий. Переходы режимов регистрируются после первого успешного опроса.</small>';
