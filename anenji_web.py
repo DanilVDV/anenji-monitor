@@ -10,6 +10,7 @@ BAUD=int(os.getenv("ANENJI_BAUD","9600"))
 SLAVE=int(os.getenv("ANENJI_SLAVE","1"))
 HTTP_PORT=int(os.getenv("ANENJI_HTTP_PORT","8088"))
 POLL_SEC=float(os.getenv("ANENJI_POLL_SEC","2.0"))
+DIAG_POLL_SEC=max(10.0,float(os.getenv("ANENJI_DIAG_POLL_SEC","15.0")))
 ALLOW_WRITE=os.getenv("ANENJI_ALLOW_WRITE","0")=="1"
 LOG_FILE=os.getenv("ANENJI_LOG","/root/anenji/changes.log")
 HISTORY_LEN=int(os.getenv("ANENJI_HISTORY","900"))
@@ -52,6 +53,7 @@ DISCHARGE_POWER_OFF_W=float(os.getenv("ANENJI_DISCHARGE_POWER_OFF_W","50"))
 DISCHARGE_ON_DELAY_SEC=float(os.getenv("ANENJI_DISCHARGE_ON_DELAY_SEC","10"))
 DISCHARGE_OFF_DELAY_SEC=float(os.getenv("ANENJI_DISCHARGE_OFF_DELAY_SEC","20"))
 DISCHARGE_REQUIRE_GRID_ABSENT=os.getenv("ANENJI_DISCHARGE_REQUIRE_GRID_ABSENT","0")=="1"
+RGB_CHARGE_DETECT_W=float(os.getenv("ANENJI_RGB_CHARGE_DETECT_W","20"))
 ANJ_BMS={
  "module_full_charge_v":28.0,"module_ov_alarm_v":28.0,"module_ov_protection_v":29.2,
  "module_uv_alarm_v":23.2,"module_uv_protection_v":20.0,
@@ -178,6 +180,99 @@ TELEMETRY={
 234:("pv_charge_current","PV charge current",10,True,"A"),
 }
 OBSERVED={200:"Status/capability word",218:"Internal/unknown",221:"Reserved/unknown",222:"Reserved/unknown",228:"Reserved/unknown",230:"Reserved/unknown",231:"Reserved/unknown",235:"Internal/unknown",236:"Internal/unknown",237:"Reserved/unknown",238:"Internal/unknown",239:"Reserved/unknown",304:"Unknown",311:"Unknown",312:"Unknown",314:"Unknown",315:"Unknown",316:"Unknown",317:"Unknown",318:"Unknown",319:"Unknown",328:"Unknown",338:"Unknown",339:"Unknown",340:"Unknown (raw 3 observed)",349:"Unknown (raw 100 observed)",351:"Maximum battery discharge current",355:"Unknown (raw 90 observed)",356:"Unknown (raw 6 observed)",357:"Unknown (raw 100 observed)",359:"EXPERIMENTAL: possible shadow/duplicate of Bulk voltage (324)",360:"EXPERIMENTAL: possible shadow/duplicate of Float voltage (325)",361:"EXPERIMENTAL: possible shadow/duplicate of Max charge current (332)",402:"EXPERIMENTAL: possible shadow/state of Main output priority (301)",403:"EXPERIMENTAL: possible shadow/state of Main charging priority (331)",404:"EXPERIMENTAL: unknown enum/state (raw 3 observed)",421:"EXPERIMENTAL: unknown parameter (raw 120 observed)",423:"EXPERIMENTAL: unknown flag/state (raw 1 observed)",434:"RTC year",435:"RTC month",436:"RTC day",437:"RTC hour",438:"RTC minute",439:"RTC second"}
+
+# Diagnostics: register mapping verified in esp32-anenji-wifi-rs485-controller.
+# Each 32-bit bitmask is stored high-word first (100/101, 104/105, 108/109).
+INVERTER_FAULTS=(
+ "Inverter module over temperature", "DCDC module over temperature", "Battery over voltage",
+ "PV module over temperature", "Output short circuit", "Inverter over voltage", "Output overload",
+ "Bus over voltage", "Bus soft start timed out", "PV over current", "PV over voltage",
+ "Battery over current", "Inverter over current", "Bus low voltage", "Reserved fault bit 14",
+ "Inverter DC component too high", "Reserved fault bit 16", "Output current zero bias too large",
+ "Inverter current zero bias too large", "Battery current zero bias too large",
+ "PV current zero bias too large", "Inverter low voltage", "Inverter negative power protection",
+ "Parallel host lost", "Parallel synchronization signal abnormal", "Battery type incompatible",
+ "Parallel versions incompatible",
+)
+INVERTER_WARNINGS=(
+ "Mains supply zero-crossing loss", "Mains waveform abnormal", "Mains over voltage",
+ "Mains low voltage", "Mains over frequency", "Mains low frequency", "PV low voltage",
+ "Over temperature", "Battery low voltage", "Battery not connected", "Overload",
+ "Battery equalization charging", "Battery undervoltage / recovery point not reached",
+ "Output power derating", "Fan blocked", "PV energy too low to use",
+ "Parallel communication interrupted", "Single/parallel output mode inconsistent",
+ "Parallel battery voltage difference too large", "Lithium battery communication abnormal",
+ "Battery discharge current exceeds configured limit",
+)
+
+def _mask_items(mask, labels):
+    # Preserve unknown/set reserved bits instead of silently dropping them.
+    return [dict(bit=bit, name=labels[bit] if bit<len(labels) else "Unknown bit %d"%bit)
+            for bit in range(32) if mask & (1<<bit)]
+
+def decode_inverter_diagnostics(raw):
+    if len(raw)!=10: raise ValueError("Expected 10 diagnostic registers (100..109)")
+    faults=(raw[0]<<16)|raw[1]
+    unmasked=(raw[4]<<16)|raw[5]
+    warnings=(raw[8]<<16)|raw[9]
+    return dict(available=True, updated=time.time(), fault_raw=faults,
+                warning_raw=warnings, warning_unmasked_raw=unmasked,
+                faults=_mask_items(faults,INVERTER_FAULTS),
+                warnings=_mask_items(warnings,INVERTER_WARNINGS),
+                warnings_unmasked=_mask_items(unmasked,INVERTER_WARNINGS), error="")
+
+
+# Observed changes only: the inverter does not provide historical timestamps in these
+# registers. Times are host timestamps of successful polling, not device event times.
+INVERTER_EVENTS=deque(maxlen=100)
+INVERTER_EVENT_STATE={"mode":None,"masks":None,"since":{}}
+
+def _inverter_event(kind, active, message, ts, bit=None, observed=False):
+    INVERTER_EVENTS.appendleft(dict(type=kind, active=active, message=message,
+                                   bit=bit, timestamp=ts, observed=observed))
+
+def update_inverter_mode(raw_mode, ts):
+    previous=INVERTER_EVENT_STATE["mode"]
+    if previous is not None and previous!=raw_mode:
+        _inverter_event("mode", True,
+            "Режим: %s → %s"%(MODE.get(previous,"Unknown (%d)"%previous),
+                               MODE.get(raw_mode,"Unknown (%d)"%raw_mode)),ts)
+        if raw_mode==3 and previous!=3:
+            _inverter_event("power",True,"Переход на питание от батарей (Off-Grid)",ts)
+        elif previous==3 and raw_mode!=3:
+            _inverter_event("power",False,"Выход из автономного режима (Off-Grid)",ts)
+    INVERTER_EVENT_STATE["mode"]=raw_mode
+
+def update_inverter_diagnostics(diag, ts):
+    previous=INVERTER_EVENT_STATE["masks"]
+    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"],
+           "warning_unmasked":diag["warning_unmasked_raw"]}
+    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS,
+           "warning_unmasked":INVERTER_WARNINGS}
+    since=INVERTER_EVENT_STATE["since"]
+    for kind, mask in masks.items():
+        old=previous[kind] if previous is not None else 0
+        changed=(old ^ mask) if previous is not None else mask
+        for bit in range(32):
+            flag=1<<bit
+            key=(kind,bit)
+            label=names[kind][bit] if bit<len(names[kind]) else "Unknown bit %d"%bit
+            if changed & flag:
+                enabled=bool(mask & flag)
+                if enabled: since[key]={"timestamp":ts,"observed":previous is None}
+                else: since.pop(key,None)
+                _inverter_event(kind,enabled,label,ts,bit,observed=previous is None)
+        field={"fault":"faults","warning":"warnings","warning_unmasked":"warnings_unmasked"}[kind]
+        for item in diag[field]:
+            stamp=since.get((kind,item["bit"]))
+            if stamp:
+                item["since"]=stamp["timestamp"]
+                item["first_observed"]=stamp["observed"]
+    INVERTER_EVENT_STATE["masks"]=masks
+    diag["events"]=list(INVERTER_EVENTS)
+    diag["mode"]=INVERTER_EVENT_STATE["mode"]
+    return diag
+
 KNOWN=set(TELEMETRY)|set(SETTINGS)|set(OBSERVED)
 
 def crc16(data):
@@ -258,8 +353,8 @@ class Bus:
                     time.sleep(.12*(attempt+1))
         raise last
 
-    def read(self,a,n=1):
-        r=self.exchange(bytes([3,a>>8,a&255,n>>8,n&255]))
+    def read(self,a,n=1,retries=3):
+        r=self.exchange(bytes([3,a>>8,a&255,n>>8,n&255]),retries=retries)
         d=r[3:3+r[2]]
         if len(d)!=n*2:raise RuntimeError("Unexpected byte count")
         return [(d[i]<<8)|d[i+1] for i in range(0,len(d),2)]
@@ -299,8 +394,9 @@ class Bus:
         return q
 
 BUS=None;CACHE_LOCK=threading.RLock()
-CACHE={"online":False,"updated":0,"status":[],"settings":[],"rtc":None,"error":"","settings_error":"","rtc_error":""}
+CACHE={"online":False,"updated":0,"status":[],"settings":[],"rtc":None,"error":"","settings_error":"","rtc_error":"","diagnostics":{"available":False,"updated":0,"faults":[],"warnings":[],"warnings_unmasked":[],"error":""}}
 HISTORY=deque(maxlen=HISTORY_LEN)
+DIAG_LAST_ATTEMPT=0.0
 
 BMS_LOCK=threading.RLock()
 BMS_PARTICIPATION={}
@@ -951,7 +1047,26 @@ def poll_once():
         CACHE.update(online=True,updated=now,status=status,error="")
         HISTORY.append(dict(ts=now,**{k:bykey.get(k) for k in ("grid_voltage","grid_frequency","grid_power","inverter_power","pv_voltage","pv_power","battery_voltage","net_battery_current","battery_soc","load_percent","inverter_temperature","output_active_power")}))
 
+    with CACHE_LOCK:
+        update_inverter_mode(vals200[1],now)
     maybe_trigger_bms_on_discharge(bykey)
+
+    # Diagnostics are optional and deliberately rate-limited. One attempt only:
+    # failed diagnostic registers must not delay core telemetry / LED API.
+    global DIAG_LAST_ATTEMPT
+    if now-DIAG_LAST_ATTEMPT >= DIAG_POLL_SEC:
+        DIAG_LAST_ATTEMPT=now
+        try:
+            diag=decode_inverter_diagnostics(BUS.read(100,10,retries=1))
+            with CACHE_LOCK:
+                CACHE["diagnostics"]=update_inverter_diagnostics(diag,time.time())
+        except Exception as e:
+            with CACHE_LOCK:
+                INVERTER_EVENT_STATE["masks"]=None
+                INVERTER_EVENT_STATE["since"].clear()
+                CACHE["diagnostics"]={"available":False,"updated":0,"faults":[],
+                                      "warnings":[],"warnings_unmasked":[],
+                                      "events":list(INVERTER_EVENTS),"error":str(e)}
 
     # Settings/RTC are optional. A temporary failure must not make status offline.
     try:
@@ -982,6 +1097,7 @@ def poller():
                 # while recently received telemetry is still fresh.
                 age=(now-CACHE.get("updated",0)) if CACHE.get("updated") else 1e9
                 CACHE["online"]=age <= max(15.0,POLL_SEC*3.0)
+                INVERTER_EVENT_STATE["mode"]=None
         time.sleep(max(.1,POLL_SEC-(time.time()-t)))
 
 def raw_items(start,vals):
@@ -1199,6 +1315,12 @@ HTML=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="
 <div id="bmsAggregate" class="grid"></div>
 <div id="bmsDevices" class="info-grid" style="margin-top:12px"></div>
 <p><small>Источник: локальная saihang-bms по BLE (read-only). Опрос выполняется только по MAC-адресам из ANENJI_BMS_MACS — read-all/scan не используется. Основные напряжение/ток батарейной шины берутся с инвертора. BMS показывает модули отдельно. При кратковременном BLE timeout сохраняется последнее успешное значение; после нескольких подряд ошибок модуль помечается как недоступный.</small></p>
+</div>
+<div class="card"><h2>Аварии и предупреждения инвертора</h2>
+<div id="inverterDiagnostics">Ожидание диагностических данных…</div>
+<h3>Журнал событий (текущий запуск)</h3>
+<div id="inverterEventLog"></div>
+<small>Modbus 100–109: аварии 100–101, предупреждения без маски 104–105, активные предупреждения 108–109. Диагностика не влияет на статус RS485.</small>
 </div>
 <div class="card"><h2>Dashboard</h2><div class="grid" id="tele"></div></div>
 <div class="card"><h2>Профили батареи</h2>
@@ -1482,6 +1604,44 @@ async function bmsRefresh(){
     }
   }catch(e){
     $('bmsState').innerHTML='<span class="err">● '+E(e.message)+'</span>';
+  }
+}
+
+async function refreshDiagnostics(){
+  try{
+    const diag=await G('/api/diagnostics');
+    const diagEl=$('inverterDiagnostics');
+    const stamp=ts=>ts?new Date(ts*1000).toLocaleString('ru-RU'):'—';
+    const entries=(arr,cls)=>arr.length
+      ? arr.map(x=>'<div class="kv"><span class="'+cls+'">'+
+          E('Бит '+x.bit+': '+x.name)+'</span><small>'+
+          (x.since?(x.first_observed?'Впервые замечено: ':'Зафиксировано: ')+E(stamp(x.since)):'Время неизвестно')+
+          '</small></div>').join('')
+      : '<small>Нет активных событий</small>';
+    if(!diag.available){
+      diagEl.innerHTML='<span class="warn">Диагностика недоступна'+
+        (diag.error?': '+E(diag.error):'')+'</span>';
+    }else{
+      const faults=Array.isArray(diag.faults)?diag.faults:[];
+      const warnings=Array.isArray(diag.warnings)?diag.warnings:[];
+      const unmasked=Array.isArray(diag.warnings_unmasked)?diag.warnings_unmasked:[];
+      diagEl.innerHTML=
+        '<div class="info-grid">'+
+        '<div class="info-box"><h3>Аварии ('+faults.length+')</h3>'+entries(faults,'err')+'</div>'+
+        '<div class="info-box"><h3>Предупреждения ('+warnings.length+')</h3>'+entries(warnings,'warn')+'</div>'+
+        '<div class="info-box"><h3>Без маскирования ('+unmasked.length+')</h3>'+entries(unmasked,'warn')+'</div>'+
+        '</div>';
+    }
+    const events=Array.isArray(diag.events)?diag.events:[];
+    $('inverterEventLog').innerHTML=events.length
+      ? '<div style="max-height:360px;overflow:auto">'+events.map(x=>
+         '<div class="kv"><span class="'+(x.type==='fault'?'err':x.type.startsWith('warning')?'warn':'')+'">'+
+         E((x.active?'● ':'○ ')+x.message)+(x.observed?' <small>(при первом чтении)</small>':'')+
+         '</span><small>'+E(stamp(x.timestamp))+'</small></div>').join('')+'</div>'
+      : '<small>Пока нет событий. Переходы режимов регистрируются после первого успешного опроса.</small>';
+
+  }catch(e){
+    $('inverterDiagnostics').textContent='Диагностика недоступна: '+e.message;
   }
 }
 
@@ -1780,11 +1940,13 @@ window.openBmsModal=openBmsModal;
 window.closeBmsModal=closeBmsModal;
 rtcNow();
 refresh();
+refreshDiagnostics();
 bmsRefresh();
 profilesLoad();
 settingsLoad();
 rawLoad();
 setInterval(refresh,2000);
+setInterval(refreshDiagnostics,5000);
 setInterval(bmsRefresh,5000);
 setInterval(settingsLoad,30000);
 
@@ -1796,6 +1958,18 @@ class H(BaseHTTPRequestHandler):
     def J(self,o,code=200):
         d=json.dumps(o,ensure_ascii=False).encode()
         try:self.send_response(code);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store");self.send_header("Content-Length",str(len(d)));self.end_headers();self.wfile.write(d)
+        except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):pass
+    def RGB(self,o,code=200):
+        # Legacy compact protocol used by anenji-rgb-display ESP8266.
+        # Preserve short keys, content type, no-store and ASCII output.
+        d=json.dumps(o,ensure_ascii=True,separators=(",",":")).encode("ascii")
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Cache-Control","no-store")
+            self.send_header("Content-Length",str(len(d)))
+            self.end_headers()
+            self.wfile.write(d)
         except (BrokenPipeError,ConnectionResetError,ConnectionAbortedError):pass
     def do_GET(self):
         p=urlparse(self.path)
@@ -1829,8 +2003,39 @@ class H(BaseHTTPRequestHandler):
                     "bms_active":es.get("bms_active",0),
                     "bms_expected":es.get("bms_expected",len(BMS_MACS))})
             if p.path=="/api/cache":
-                with CACHE_LOCK:c=dict(CACHE)
+                with CACHE_LOCK:c={k:v for k,v in CACHE.items() if k!="diagnostics"}
                 c.update(port=PORT,baud=BAUD,slave=SLAVE,poll_sec=POLL_SEC,fresh_sec=max(15.0,POLL_SEC*3.0),write_enabled=ALLOW_WRITE,bus=dict(tx=BUS.tx,rx=BUS.rx,errors=BUS.errors,timeouts=BUS.timeouts,last_error=BUS.last_error,last_ok=BUS.last_ok),energy=energy_summary());return self.J(c)
+            if p.path=="/api/diagnostics":
+                with CACHE_LOCK:
+                    return self.J(dict(CACHE["diagnostics"]))
+            if p.path=="/api/rgb":
+                # Contract comes from anenji-rgb-display/server/history/
+                # anenji_web_v2.11.32_rgb_grid_present.py.
+                es=energy_summary()
+                batt_w=float(es.get("battery_power_w") or 0.0)
+                dis=bool(es.get("battery_discharging"))
+                bat_state=1 if dis else (-1 if batt_w<=-RGB_CHARGE_DETECT_W else 0)
+                eta=es.get("eta_to_reserve_sec")
+                _soc=es.get("battery_soc_pct")
+                try:
+                    _soc=float(_soc)
+                    soc=int(round(_soc)) if 0.0 <= _soc <= 100.0 else -1
+                except Exception:
+                    soc=-1
+                return self.RGB({
+                    "p":int(round(float(es.get("pv_w") or 0.0))),
+                    "l":int(round(float(es.get("load_w") or 0.0))),
+                    "g":int(round(float(es.get("grid_w") or 0.0))),
+                    "r":1 if bool(es.get("grid_present")) else 0,
+                    "b":int(round(batt_w)),
+                    "v":round(float(es.get("battery_voltage_v") or 0.0),1),
+                    "c":soc,
+                    "d":1 if dis else 0,
+                    "a":1 if bool(es.get("attention_required")) else 0,
+                    "e":int(round(float(eta))) if eta is not None else -1,
+                    "t":time.strftime("%H:%M"),
+                    "s":bat_state
+                })
             if p.path=="/api/summary":
                 return self.J({"ok":True,**energy_summary()})
             if p.path=="/api/status":
