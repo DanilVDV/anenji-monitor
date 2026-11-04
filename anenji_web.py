@@ -219,6 +219,56 @@ def decode_inverter_diagnostics(raw):
                 warnings=_mask_items(warnings,INVERTER_WARNINGS),
                 warnings_unmasked=_mask_items(unmasked,INVERTER_WARNINGS), error="")
 
+
+# Observed changes only: the inverter does not provide historical timestamps in these
+# registers. Times are host timestamps of successful polling, not device event times.
+INVERTER_EVENTS=deque(maxlen=100)
+INVERTER_EVENT_STATE={"mode":None,"masks":None,"since":{}}
+
+def _inverter_event(kind, active, message, ts, bit=None, observed=False):
+    INVERTER_EVENTS.appendleft(dict(type=kind, active=active, message=message,
+                                   bit=bit, timestamp=ts, observed=observed))
+
+def update_inverter_mode(raw_mode, ts):
+    previous=INVERTER_EVENT_STATE["mode"]
+    if previous is not None and previous!=raw_mode:
+        _inverter_event("mode", True,
+            "Режим: %s → %s"%(MODE.get(previous,"Unknown (%d)"%previous),
+                               MODE.get(raw_mode,"Unknown (%d)"%raw_mode)),ts)
+        if raw_mode==3 and previous!=3:
+            _inverter_event("power",True,"Переход на питание от батарей (Off-Grid)",ts)
+        elif previous==3 and raw_mode!=3:
+            _inverter_event("power",False,"Выход из автономного режима (Off-Grid)",ts)
+    INVERTER_EVENT_STATE["mode"]=raw_mode
+
+def update_inverter_diagnostics(diag, ts):
+    previous=INVERTER_EVENT_STATE["masks"]
+    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"]}
+    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS}
+    since=INVERTER_EVENT_STATE["since"]
+    for kind, mask in masks.items():
+        old=previous[kind] if previous is not None else 0
+        changed=(old ^ mask) if previous is not None else mask
+        for bit in range(32):
+            flag=1<<bit
+            key=(kind,bit)
+            label=names[kind][bit] if bit<len(names[kind]) else "Unknown bit %d"%bit
+            if changed & flag:
+                enabled=bool(mask & flag)
+                if enabled: since[key]={"timestamp":ts,"observed":previous is None}
+                else: since.pop(key,None)
+                _inverter_event(kind,enabled,label,ts,bit,observed=previous is None)
+        field="faults" if kind=="fault" else "warnings"
+        for item in diag[field]:
+            stamp=since.get((kind,item["bit"]))
+            if stamp:
+                item["since"]=stamp["timestamp"]
+                item["first_observed"]=stamp["observed"]
+    INVERTER_EVENT_STATE["masks"]=masks
+    diag["events"]=list(INVERTER_EVENTS)
+    diag["mode"]=INVERTER_EVENT_STATE["mode"]
+    return diag
+
 KNOWN=set(TELEMETRY)|set(SETTINGS)|set(OBSERVED)
 
 def crc16(data):
@@ -992,18 +1042,25 @@ def poll_once():
         CACHE.update(online=True,updated=now,status=status,error="")
         HISTORY.append(dict(ts=now,**{k:bykey.get(k) for k in ("grid_voltage","grid_frequency","grid_power","inverter_power","pv_voltage","pv_power","battery_voltage","net_battery_current","battery_soc","load_percent","inverter_temperature","output_active_power")}))
 
+    with CACHE_LOCK:
+        update_inverter_mode(vals200[1],now)
     maybe_trigger_bms_on_discharge(bykey)
 
     # Independent, read-only diagnostic block. Missing/unsupported diagnostics
     # must not make successfully polled telemetry appear offline.
     try:
         diag=decode_inverter_diagnostics(BUS.read_chunked(100,10,10))
-        with CACHE_LOCK:CACHE["diagnostics"]=diag
+        with CACHE_LOCK:
+            CACHE["diagnostics"]=update_inverter_diagnostics(diag,time.time())
     except Exception as e:
         with CACHE_LOCK:
-            # Never present stale fault/warning values as current.
+            # Do not label cached fault bits as current after a failed read.
+            # A subsequent recovery establishes a new observation baseline.
+            INVERTER_EVENT_STATE["masks"]=None
+            INVERTER_EVENT_STATE["since"].clear()
             CACHE["diagnostics"]={"available":False,"updated":0,"faults":[],
-                                  "warnings":[],"warnings_unmasked":[],"error":str(e)}
+                                  "warnings":[],"warnings_unmasked":[],
+                                  "events":list(INVERTER_EVENTS),"error":str(e)}
 
     # Settings/RTC are optional. A temporary failure must not make status offline.
     try:
@@ -1034,6 +1091,7 @@ def poller():
                 # while recently received telemetry is still fresh.
                 age=(now-CACHE.get("updated",0)) if CACHE.get("updated") else 1e9
                 CACHE["online"]=age <= max(15.0,POLL_SEC*3.0)
+                INVERTER_EVENT_STATE["mode"]=None
         time.sleep(max(.1,POLL_SEC-(time.time()-t)))
 
 def raw_items(start,vals):
@@ -1254,6 +1312,8 @@ HTML=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="
 </div>
 <div class="card"><h2>Аварии и предупреждения инвертора</h2>
 <div id="inverterDiagnostics">Ожидание диагностических данных…</div>
+<h3>Журнал событий (текущий запуск)</h3>
+<div id="inverterEventLog"></div>
 <small>Modbus 100–109: аварии 100–101, предупреждения без маски 104–105, активные предупреждения 108–109. Диагностика не влияет на статус RS485.</small>
 </div>
 <div class="card"><h2>Dashboard</h2><div class="grid" id="tele"></div></div>
@@ -1558,13 +1618,17 @@ async function refresh(){
 
     const diag=j.diagnostics||{};
     const diagEl=$('inverterDiagnostics');
+    const stamp=ts=>ts?new Date(ts*1000).toLocaleString('ru-RU'):'—';
+    const entries=(arr,cls)=>arr.length
+      ? arr.map(x=>'<div class="kv"><span class="'+cls+'">'+
+          E('Бит '+x.bit+': '+x.name)+'</span><small>'+
+          (x.since?(x.first_observed?'Впервые замечено: ':'Зафиксировано: ')+E(stamp(x.since)):'Время неизвестно')+
+          '</small></div>').join('')
+      : '<small>Нет активных событий</small>';
     if(!diag.available){
       diagEl.innerHTML='<span class="warn">Диагностика недоступна'+
         (diag.error?': '+E(diag.error):'')+'</span>';
     }else{
-      const entries=(arr,cls)=>arr.length
-        ? arr.map(x=>'<div class="kv"><span class="'+cls+'">'+E('Бит '+x.bit+': '+x.name)+'</span></div>').join('')
-        : '<small>Нет активных событий</small>';
       const faults=Array.isArray(diag.faults)?diag.faults:[];
       const warnings=Array.isArray(diag.warnings)?diag.warnings:[];
       const unmasked=Array.isArray(diag.warnings_unmasked)?diag.warnings_unmasked:[];
@@ -1575,6 +1639,13 @@ async function refresh(){
         '<div class="info-box"><h3>Без маскирования ('+unmasked.length+')</h3>'+entries(unmasked,'warn')+'</div>'+
         '</div>';
     }
+    const events=Array.isArray(diag.events)?diag.events:[];
+    $('inverterEventLog').innerHTML=events.length
+      ? '<div style="max-height:360px;overflow:auto">'+events.map(x=>
+         '<div class="kv"><span class="'+(x.type==='fault'?'err':x.type==='warning'?'warn':'')+'">'+
+         E((x.active?'● ':'○ ')+x.message)+(x.observed?' <small>(при первом чтении)</small>':'')+
+         '</span><small>'+E(stamp(x.timestamp))+'</small></div>').join('')+'</div>'
+      : '<small>Пока нет событий. Переходы режимов регистрируются после первого успешного опроса.</small>';
 
     const status=Array.isArray(j.status)?j.status:[];
     $('tele').innerHTML=status.map(x=>
