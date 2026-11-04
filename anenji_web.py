@@ -178,6 +178,47 @@ TELEMETRY={
 234:("pv_charge_current","PV charge current",10,True,"A"),
 }
 OBSERVED={200:"Status/capability word",218:"Internal/unknown",221:"Reserved/unknown",222:"Reserved/unknown",228:"Reserved/unknown",230:"Reserved/unknown",231:"Reserved/unknown",235:"Internal/unknown",236:"Internal/unknown",237:"Reserved/unknown",238:"Internal/unknown",239:"Reserved/unknown",304:"Unknown",311:"Unknown",312:"Unknown",314:"Unknown",315:"Unknown",316:"Unknown",317:"Unknown",318:"Unknown",319:"Unknown",328:"Unknown",338:"Unknown",339:"Unknown",340:"Unknown (raw 3 observed)",349:"Unknown (raw 100 observed)",351:"Maximum battery discharge current",355:"Unknown (raw 90 observed)",356:"Unknown (raw 6 observed)",357:"Unknown (raw 100 observed)",359:"EXPERIMENTAL: possible shadow/duplicate of Bulk voltage (324)",360:"EXPERIMENTAL: possible shadow/duplicate of Float voltage (325)",361:"EXPERIMENTAL: possible shadow/duplicate of Max charge current (332)",402:"EXPERIMENTAL: possible shadow/state of Main output priority (301)",403:"EXPERIMENTAL: possible shadow/state of Main charging priority (331)",404:"EXPERIMENTAL: unknown enum/state (raw 3 observed)",421:"EXPERIMENTAL: unknown parameter (raw 120 observed)",423:"EXPERIMENTAL: unknown flag/state (raw 1 observed)",434:"RTC year",435:"RTC month",436:"RTC day",437:"RTC hour",438:"RTC minute",439:"RTC second"}
+
+# Diagnostics: register mapping verified in esp32-anenji-wifi-rs485-controller.
+# Each 32-bit bitmask is stored high-word first (100/101, 104/105, 108/109).
+INVERTER_FAULTS=(
+ "Inverter module over temperature", "DCDC module over temperature", "Battery over voltage",
+ "PV module over temperature", "Output short circuit", "Inverter over voltage", "Output overload",
+ "Bus over voltage", "Bus soft start timed out", "PV over current", "PV over voltage",
+ "Battery over current", "Inverter over current", "Bus low voltage", "Reserved fault bit 14",
+ "Inverter DC component too high", "Reserved fault bit 16", "Output current zero bias too large",
+ "Inverter current zero bias too large", "Battery current zero bias too large",
+ "PV current zero bias too large", "Inverter low voltage", "Inverter negative power protection",
+ "Parallel host lost", "Parallel synchronization signal abnormal", "Battery type incompatible",
+ "Parallel versions incompatible",
+)
+INVERTER_WARNINGS=(
+ "Mains supply zero-crossing loss", "Mains waveform abnormal", "Mains over voltage",
+ "Mains low voltage", "Mains over frequency", "Mains low frequency", "PV low voltage",
+ "Over temperature", "Battery low voltage", "Battery not connected", "Overload",
+ "Battery equalization charging", "Battery undervoltage / recovery point not reached",
+ "Output power derating", "Fan blocked", "PV energy too low to use",
+ "Parallel communication interrupted", "Single/parallel output mode inconsistent",
+ "Parallel battery voltage difference too large", "Lithium battery communication abnormal",
+ "Battery discharge current exceeds configured limit",
+)
+
+def _mask_items(mask, labels):
+    # Preserve unknown/set reserved bits instead of silently dropping them.
+    return [dict(bit=bit, name=labels[bit] if bit<len(labels) else "Unknown bit %d"%bit)
+            for bit in range(32) if mask & (1<<bit)]
+
+def decode_inverter_diagnostics(raw):
+    if len(raw)!=10: raise ValueError("Expected 10 diagnostic registers (100..109)")
+    faults=(raw[0]<<16)|raw[1]
+    unmasked=(raw[4]<<16)|raw[5]
+    warnings=(raw[8]<<16)|raw[9]
+    return dict(available=True, updated=time.time(), fault_raw=faults,
+                warning_raw=warnings, warning_unmasked_raw=unmasked,
+                faults=_mask_items(faults,INVERTER_FAULTS),
+                warnings=_mask_items(warnings,INVERTER_WARNINGS),
+                warnings_unmasked=_mask_items(unmasked,INVERTER_WARNINGS), error="")
+
 KNOWN=set(TELEMETRY)|set(SETTINGS)|set(OBSERVED)
 
 def crc16(data):
@@ -299,7 +340,7 @@ class Bus:
         return q
 
 BUS=None;CACHE_LOCK=threading.RLock()
-CACHE={"online":False,"updated":0,"status":[],"settings":[],"rtc":None,"error":"","settings_error":"","rtc_error":""}
+CACHE={"online":False,"updated":0,"status":[],"settings":[],"rtc":None,"error":"","settings_error":"","rtc_error":"","diagnostics":{"available":False,"updated":0,"faults":[],"warnings":[],"warnings_unmasked":[],"error":""}}
 HISTORY=deque(maxlen=HISTORY_LEN)
 
 BMS_LOCK=threading.RLock()
@@ -953,6 +994,17 @@ def poll_once():
 
     maybe_trigger_bms_on_discharge(bykey)
 
+    # Independent, read-only diagnostic block. Missing/unsupported diagnostics
+    # must not make successfully polled telemetry appear offline.
+    try:
+        diag=decode_inverter_diagnostics(BUS.read_chunked(100,10,10))
+        with CACHE_LOCK:CACHE["diagnostics"]=diag
+    except Exception as e:
+        with CACHE_LOCK:
+            # Never present stale fault/warning values as current.
+            CACHE["diagnostics"]={"available":False,"updated":0,"faults":[],
+                                  "warnings":[],"warnings_unmasked":[],"error":str(e)}
+
     # Settings/RTC are optional. A temporary failure must not make status offline.
     try:
         b=read_settings_blocks()
@@ -1199,6 +1251,10 @@ HTML=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="
 <div id="bmsAggregate" class="grid"></div>
 <div id="bmsDevices" class="info-grid" style="margin-top:12px"></div>
 <p><small>Источник: локальная saihang-bms по BLE (read-only). Опрос выполняется только по MAC-адресам из ANENJI_BMS_MACS — read-all/scan не используется. Основные напряжение/ток батарейной шины берутся с инвертора. BMS показывает модули отдельно. При кратковременном BLE timeout сохраняется последнее успешное значение; после нескольких подряд ошибок модуль помечается как недоступный.</small></p>
+</div>
+<div class="card"><h2>Аварии и предупреждения инвертора</h2>
+<div id="inverterDiagnostics">Ожидание диагностических данных…</div>
+<small>Modbus 100–109: аварии 100–101, предупреждения без маски 104–105, активные предупреждения 108–109. Диагностика не влияет на статус RS485.</small>
 </div>
 <div class="card"><h2>Dashboard</h2><div class="grid" id="tele"></div></div>
 <div class="card"><h2>Профили батареи</h2>
@@ -1499,6 +1555,26 @@ async function refresh(){
       `TX ${j.bus.tx} · RX ${j.bus.rx} · errors ${j.bus.errors} · timeouts ${j.bus.timeouts}`+
       `<br><b>RTC:</b> ${E(j.rtc||'unknown')}`+
       `<br><small>${j.error?('last poll: '+E(j.error)):''} ${j.settings_error?' · settings: '+E(j.settings_error):''} ${j.rtc_error?' · rtc: '+E(j.rtc_error):''}</small>`;
+
+    const diag=j.diagnostics||{};
+    const diagEl=$('inverterDiagnostics');
+    if(!diag.available){
+      diagEl.innerHTML='<span class="warn">Диагностика недоступна'+
+        (diag.error?': '+E(diag.error):'')+'</span>';
+    }else{
+      const entries=(arr,cls)=>arr.length
+        ? arr.map(x=>'<div class="kv"><span class="'+cls+'">'+E('Бит '+x.bit+': '+x.name)+'</span></div>').join('')
+        : '<small>Нет активных событий</small>';
+      const faults=Array.isArray(diag.faults)?diag.faults:[];
+      const warnings=Array.isArray(diag.warnings)?diag.warnings:[];
+      const unmasked=Array.isArray(diag.warnings_unmasked)?diag.warnings_unmasked:[];
+      diagEl.innerHTML=
+        '<div class="info-grid">'+
+        '<div class="info-box"><h3>Аварии ('+faults.length+')</h3>'+entries(faults,'err')+'</div>'+
+        '<div class="info-box"><h3>Предупреждения ('+warnings.length+')</h3>'+entries(warnings,'warn')+'</div>'+
+        '<div class="info-box"><h3>Без маскирования ('+unmasked.length+')</h3>'+entries(unmasked,'warn')+'</div>'+
+        '</div>';
+    }
 
     const status=Array.isArray(j.status)?j.status:[];
     $('tele').innerHTML=status.map(x=>
