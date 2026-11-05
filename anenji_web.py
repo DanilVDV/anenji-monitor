@@ -869,6 +869,42 @@ def _update_attention_state(raw_condition,now=None):
                 "attention_clear_pending":False,"attention_clear_pending_sec":0.0,
                 "attention_changed_at":st.get("changed_at",0.0)}
 
+def select_battery_soc(inverter_soc, devices, bms_updated, now):
+    """Show the mean of all fresh BMS SOCs; fall back to inverter SOC.
+
+    For a 2S2P bank this is a display estimate, not an inverter setting.
+    Never average online and stale or missing module values.
+    """
+    try:
+        inv=float(inverter_soc)
+        if not 0<=inv<=100: inv=None
+    except (TypeError,ValueError):
+        inv=None
+    fallback={"battery_soc_pct":inv,"battery_soc_source":"inverter" if inv is not None else "unavailable",
+              "bms_battery_soc_pct":None,"inverter_battery_soc_pct":inv}
+    if not BMS_ENABLE or not bms_updated or now-bms_updated>BMS_STALE_AFTER_SEC:
+        return fallback
+    if len(devices)!=BMS_EXPECTED_PACKS or not devices:
+        return fallback
+    socs=[]
+    for d in devices:
+        if not isinstance(d,dict) or not d.get("_online") or d.get("_stale"):
+            return fallback
+        last=float(d.get("_last_success") or 0)
+        if not last or now-last>BMS_STALE_AFTER_SEC:
+            return fallback
+        try:
+            soc=float(d["pack"]["soc_pct"])
+        except (KeyError,TypeError,ValueError):
+            return fallback
+        if not 0<=soc<=100:
+            return fallback
+        socs.append(soc)
+    bms_soc=sum(socs)/len(socs)
+    return {"battery_soc_pct":bms_soc,"battery_soc_source":"bms",
+            "bms_battery_soc_pct":bms_soc,"inverter_battery_soc_pct":inv}
+
+
 def energy_summary():
     now=time.time()
     with CACHE_LOCK:
@@ -878,6 +914,7 @@ def energy_summary():
         try:return float(sm.get(k,d))
         except:return float(d)
     bv=num("battery_voltage");ba=num("net_battery_current",num("battery_current"))
+    inverter_soc=num("battery_soc",-1)
     batt_w=-(bv*ba) if bv>0 else 0.0
     grid_v=num("grid_voltage")
     grid_present=bool(grid_v>=GRID_PRESENT_V)
@@ -897,6 +934,7 @@ def energy_summary():
         devices=json.loads(json.dumps(BMS_CACHE.get("devices") or []))
         healthy=int(BMS_CACHE.get("healthy_count",0) or 0);total=len(BMS_CACHE.get("devices") or [])
 
+    soc_info=select_battery_soc(inverter_soc,devices,bms_updated,now)
     packs=_classify_bms_participation(devices,bank_discharging)
     active=[p for p in packs if p["state"]=="active"]
     suspect=[p for p in packs if p["state"]=="suspect"]
@@ -959,6 +997,7 @@ def energy_summary():
       "attention_grid_ok":attention_grid_ok,
       "attention_condition":attention_condition,**attention,
       "battery_voltage_v":bv,"battery_current_a":ba,"battery_power_w":batt_w,"battery_avg_power_w":avg_w,
+      **soc_info,
       "eta_window_sec":ETA_AVG_SEC,"eta_samples":hist.get("samples",0),"reserve_soc_pct":reserve,
       "bms_active":len(active),"bms_online":healthy,"bms_total":len(packs),"bms_expected":len(packs),
       "active_packs":[p["id"] for p in active],
@@ -1699,7 +1738,9 @@ async function refresh(){
       ? ` · ⚠ ATTENTION (${attentionMode})`
       : (en.attention_pending?` · alert in ${etaText(Math.max(0,(en.attention_on_delay_sec||0)-(en.attention_pending_sec||0)))} (${attentionMode})`:'');
     const dischargeModePart=en.discharge_require_grid_absent?' · discharge: no-grid only':'';
-    $('fBatSub').textContent=`${fmt(val(m,'battery_soc',0),0)} % · ${fmt(bc,1)} A${activePart}${etaPart}${problemPart}${attentionPart}${dischargeModePart}`;
+    const displaySoc=en.battery_soc_pct!=null?en.battery_soc_pct:val(m,'battery_soc',0);
+    const socSource=en.battery_soc_source==='bms'?'BMS':(en.battery_soc_source==='inverter'?'инвертор':'неизвестно');
+    $('fBatSub').textContent=`${fmt(displaySoc,0)} % (${socSource}) · ${fmt(bc,1)} A${activePart}${etaPart}${problemPart}${attentionPart}${dischargeModePart}`;
 
     $('pvDown').className='flow-v down '+(pv>5?'active':'');
 
@@ -1726,7 +1767,8 @@ async function refresh(){
     $('infoBattery').innerHTML=
       kv('Voltage',fmt(val(m,'battery_voltage',0),1)+' V')+
       kv('Current',fmt(bc,1)+' A')+
-      kv('SOC',fmt(val(m,'battery_soc',0),0)+' %')+
+      kv('SOC банка ('+socSource+')',fmt(displaySoc,1)+' %')+
+      kv('SOC инвертора (reg 229)',fmt(val(m,'battery_soc',0),0)+' %')+
       kv('Active remaining',en.active_remaining_wh?fmt(en.active_remaining_wh/1000,2)+' kWh':'—')+
       kv('Active usable to reserve',en.active_usable_to_reserve_wh?fmt(en.active_usable_to_reserve_wh/1000,2)+' kWh':'—')+
       kv('10-min battery avg',en.battery_avg_power_w!=null?fmt(en.battery_avg_power_w,0)+' W':'—')+
