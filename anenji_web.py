@@ -245,10 +245,10 @@ def update_inverter_mode(raw_mode, ts):
 
 def update_inverter_diagnostics(diag, ts):
     previous=INVERTER_EVENT_STATE["masks"]
-    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"],
-           "warning_unmasked":diag["warning_unmasked_raw"]}
-    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS,
-           "warning_unmasked":INVERTER_WARNINGS}
+    # Unmasked bits are raw diagnostic context, not separate user events:
+    # otherwise the same warning appears twice in the log.
+    masks={"fault":diag["fault_raw"],"warning":diag["warning_raw"]}
+    names={"fault":INVERTER_FAULTS,"warning":INVERTER_WARNINGS}
     since=INVERTER_EVENT_STATE["since"]
     for kind, mask in masks.items():
         old=previous[kind] if previous is not None else 0
@@ -262,7 +262,7 @@ def update_inverter_diagnostics(diag, ts):
                 if enabled: since[key]={"timestamp":ts,"observed":previous is None}
                 else: since.pop(key,None)
                 _inverter_event(kind,enabled,label,ts,bit,observed=previous is None)
-        field={"fault":"faults","warning":"warnings","warning_unmasked":"warnings_unmasked"}[kind]
+        field="faults" if kind=="fault" else "warnings"
         for item in diag[field]:
             stamp=since.get((kind,item["bit"]))
             if stamp:
@@ -1318,8 +1318,10 @@ HTML=r'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="
 </div>
 <div class="card"><h2>Аварии и предупреждения инвертора</h2>
 <div id="inverterDiagnostics">Ожидание диагностических данных…</div>
-<h3>Журнал событий (текущий запуск)</h3>
-<div id="inverterEventLog"></div>
+<details id="inverterEventsDetails" style="margin-top:12px">
+<summary style="cursor:pointer;font-weight:600">Журнал событий (текущий запуск) <span id="inverterEventCount"></span></summary>
+<div id="inverterEventLog" style="margin-top:10px"></div>
+</details>
 <small>Modbus 100–109: аварии 100–101, предупреждения без маски 104–105, активные предупреждения 108–109. Диагностика не влияет на статус RS485.</small>
 </div>
 <div class="card"><h2>Dashboard</h2><div class="grid" id="tele"></div></div>
@@ -1618,26 +1620,30 @@ async function refreshDiagnostics(){
           (x.since?(x.first_observed?'Впервые замечено: ':'Зафиксировано: ')+E(stamp(x.since)):'Время неизвестно')+
           '</small></div>').join('')
       : '<small>Нет активных событий</small>';
+    const events=Array.isArray(diag.events)?diag.events:[];
     if(!diag.available){
       diagEl.innerHTML='<span class="warn">Диагностика недоступна'+
         (diag.error?': '+E(diag.error):'')+'</span>';
     }else{
       const faults=Array.isArray(diag.faults)?diag.faults:[];
       const warnings=Array.isArray(diag.warnings)?diag.warnings:[];
-      const unmasked=Array.isArray(diag.warnings_unmasked)?diag.warnings_unmasked:[];
+      // Show only the newest currently active warning; all changes remain in log.
+      const latest=warnings.slice().sort((a,b)=>(b.since||0)-(a.since||0))[0];
       diagEl.innerHTML=
         '<div class="info-grid">'+
         '<div class="info-box"><h3>Аварии ('+faults.length+')</h3>'+entries(faults,'err')+'</div>'+
-        '<div class="info-box"><h3>Предупреждения ('+warnings.length+')</h3>'+entries(warnings,'warn')+'</div>'+
-        '<div class="info-box"><h3>Без маскирования ('+unmasked.length+')</h3>'+entries(unmasked,'warn')+'</div>'+
+        '<div class="info-box"><h3>Последнее предупреждение ('+warnings.length+' активных)</h3>'+
+          (latest?entries([latest],'warn'):'<small>Нет активных предупреждений</small>')+'</div>'+
         '</div>';
     }
-    const events=Array.isArray(diag.events)?diag.events:[];
+    $('inverterEventCount').textContent='('+events.length+')';
     $('inverterEventLog').innerHTML=events.length
       ? '<div style="max-height:360px;overflow:auto">'+events.map(x=>
-         '<div class="kv"><span class="'+(x.type==='fault'?'err':x.type.startsWith('warning')?'warn':'')+'">'+
+         '<div class="kv" style="justify-content:flex-start;align-items:baseline">'+
+         '<small style="min-width:155px;flex-shrink:0">'+E(stamp(x.timestamp))+'</small>'+
+         '<span class="'+(x.type==='fault'?'err':x.type.startsWith('warning')?'warn':'')+'">'+
          E((x.active?'● ':'○ ')+x.message)+(x.observed?' <small>(при первом чтении)</small>':'')+
-         '</span><small>'+E(stamp(x.timestamp))+'</small></div>').join('')+'</div>'
+         '</span></div>').join('')+'</div>'
       : '<small>Пока нет событий. Переходы режимов регистрируются после первого успешного опроса.</small>';
 
   }catch(e){
